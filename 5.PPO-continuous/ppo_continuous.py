@@ -4,97 +4,130 @@ from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 import torch.nn as nn
 from torch.distributions import Beta, Normal
 
-
+# 交叉注意力 cross-attention 版本
 # Trick 8: orthogonal initialization
 def orthogonal_init(layer, gain=1.0):
     nn.init.orthogonal_(layer.weight, gain=gain)
     nn.init.constant_(layer.bias, 0)
 
 
-class Actor_Beta(nn.Module):
-    def __init__(self, args):
-        super(Actor_Beta, self).__init__()
-        self.fc1 = nn.Linear(args.state_dim, args.hidden_width)
-        self.fc2 = nn.Linear(args.hidden_width, args.hidden_width)
-        self.alpha_layer = nn.Linear(args.hidden_width, args.action_dim)
-        self.beta_layer = nn.Linear(args.hidden_width, args.action_dim)
-        self.activate_func = [nn.ReLU(), nn.Tanh()][args.use_tanh]  # Trick10: use tanh
+# =====================================================================
+# 【核心创新模块】：交叉注意力特征提取器 (Cross-Attention Extractor)
+# =====================================================================
+class AttentionExtractor(nn.Module):
+    def __init__(self, embed_dim=32, num_heads=4):
+        super(AttentionExtractor, self).__init__()
+        # 1. 身份转换器 (Linear层)
+        # UAV状态有 5 维，User状态有 4 维
+        self.q_linear = nn.Linear(5, embed_dim)
+        self.k_linear = nn.Linear(4, embed_dim)
+        self.v_linear = nn.Linear(4, embed_dim)
 
-        if args.use_orthogonal_init:
-            print("------use_orthogonal_init------")
-            orthogonal_init(self.fc1)
-            orthogonal_init(self.fc2)
-            orthogonal_init(self.alpha_layer, gain=0.01)
-            orthogonal_init(self.beta_layer, gain=0.01)
+        # 2. PyTorch 官方交叉注意力模块 (batch_first=True 方便处理 (Batch, Seq, Feature) 格式)
+        self.attention = nn.MultiheadAttention(embed_dim, num_heads=num_heads, batch_first=True)
 
-    def forward(self, s):
-        s = self.activate_func(self.fc1(s))
-        s = self.activate_func(self.fc2(s))
-        # alpha and beta need to be larger than 1,so we use 'softplus' as the activation function and then plus 1
-        alpha = F.softplus(self.alpha_layer(s)) + 1.0
-        beta = F.softplus(self.beta_layer(s)) + 1.0
-        return alpha, beta
+    def forward(self, obs):
+        # obs 形状: (Batch, 205)
+        uav_state = obs[:, :5]  # 无人机与禁飞区状态 (Batch, 5)
+        users_state = obs[:, 5:]  # 50个设备的状态 (Batch, 200)
 
-    def get_dist(self, s):
-        alpha, beta = self.forward(s)
-        dist = Beta(alpha, beta)
-        return dist
+        # 将 200 维的设备状态折叠成 50 个独立的实体，每个实体 4 维
+        users_state = users_state.view(-1, 50, 4)  # (Batch, 50, 4)
 
-    def mean(self, s):
-        alpha, beta = self.forward(s)
-        mean = alpha / (alpha + beta)  # The mean of the beta distribution
-        return mean
+        # 生成 Q, K, V
+        # Q 增加一个维度代表只有 1 个查询主体(无人机) -> (Batch, 1, embed_dim)
+        Q = self.q_linear(uav_state).unsqueeze(1)
+        K = self.k_linear(users_state)  # (Batch, 50, embed_dim)
+        V = self.v_linear(users_state)  # (Batch, 50, embed_dim)
+
+        # 计算交叉注意力 (attn_out 形状: Batch, 1, embed_dim)
+        attn_out, attn_weights = self.attention(query=Q, key=K, value=V)
+
+        # 去掉中间多余的维度 -> (Batch, embed_dim)
+        attn_out = attn_out.squeeze(1)
+
+        # 将原始无人机状态与注意力提炼出的核心目标特征拼接
+        combined_features = torch.cat([uav_state, attn_out], dim=-1)  # (Batch, 5 + embed_dim) = (Batch, 37)
+        return combined_features
 
 
+# =====================================================================
+# 重构的 Actor (高斯分布) - 结合了交叉注意力
+# =====================================================================
 class Actor_Gaussian(nn.Module):
     def __init__(self, args):
         super(Actor_Gaussian, self).__init__()
         self.max_action = args.max_action
-        self.fc1 = nn.Linear(args.state_dim, args.hidden_width)
+
+        # 植入注意力提取器
+        self.extractor = AttentionExtractor(embed_dim=32, num_heads=4)
+
+        # 注意力提取后，输出维度是 37 (5维UAV + 32维注意力特征)
+        extracted_dim = 37
+        self.fc1 = nn.Linear(extracted_dim, args.hidden_width)
         self.fc2 = nn.Linear(args.hidden_width, args.hidden_width)
         self.mean_layer = nn.Linear(args.hidden_width, args.action_dim)
-        self.log_std = nn.Parameter(torch.zeros(1, args.action_dim))  # We use 'nn.Parameter' to train log_std automatically
-        self.activate_func = [nn.ReLU(), nn.Tanh()][args.use_tanh]  # Trick10: use tanh
+        self.log_std = nn.Parameter(torch.zeros(1, args.action_dim))
+        self.activate_func = [nn.ReLU(), nn.Tanh()][args.use_tanh]
 
         if args.use_orthogonal_init:
-            print("------use_orthogonal_init------")
+            print("------use_orthogonal_init (Actor)------")
             orthogonal_init(self.fc1)
             orthogonal_init(self.fc2)
             orthogonal_init(self.mean_layer, gain=0.01)
 
     def forward(self, s):
-        s = self.activate_func(self.fc1(s))
-        s = self.activate_func(self.fc2(s))
-        mean = self.max_action * torch.tanh(self.mean_layer(s))  # [-1,1]->[-max_action,max_action]
+        # 第一步：经过交叉注意力“聚光灯”筛选信息
+        features = self.extractor(s)
+        # 第二步：常规的多层感知机进行动作推理
+        x = self.activate_func(self.fc1(features))
+        x = self.activate_func(self.fc2(x))
+        mean = self.max_action * torch.tanh(self.mean_layer(x))
         return mean
 
     def get_dist(self, s):
         mean = self.forward(s)
-        log_std = self.log_std.expand_as(mean)  # To make 'log_std' have the same dimension as 'mean'
-        std = torch.exp(log_std)  # The reason we train the 'log_std' is to ensure std=exp(log_std)>0
-        dist = Normal(mean, std)  # Get the Gaussian distribution
+        log_std = self.log_std.expand_as(mean)
+        std = torch.exp(log_std)
+        dist = Normal(mean, std)
         return dist
 
 
+# =====================================================================
+# 重构的 Critic - 同样结合交叉注意力，使其打分更准确
+# =====================================================================
 class Critic(nn.Module):
     def __init__(self, args):
         super(Critic, self).__init__()
-        self.fc1 = nn.Linear(args.state_dim, args.hidden_width)
+
+        # 植入注意力提取器
+        self.extractor = AttentionExtractor(embed_dim=32, num_heads=4)
+
+        extracted_dim = 37
+        self.fc1 = nn.Linear(extracted_dim, args.hidden_width)
         self.fc2 = nn.Linear(args.hidden_width, args.hidden_width)
         self.fc3 = nn.Linear(args.hidden_width, 1)
-        self.activate_func = [nn.ReLU(), nn.Tanh()][args.use_tanh]  # Trick10: use tanh
+        self.activate_func = [nn.ReLU(), nn.Tanh()][args.use_tanh]
 
         if args.use_orthogonal_init:
-            print("------use_orthogonal_init------")
+            print("------use_orthogonal_init (Critic)------")
             orthogonal_init(self.fc1)
             orthogonal_init(self.fc2)
             orthogonal_init(self.fc3)
 
     def forward(self, s):
-        s = self.activate_func(self.fc1(s))
-        s = self.activate_func(self.fc2(s))
-        v_s = self.fc3(s)
+        # 第一步：经过交叉注意力提取全局局势
+        features = self.extractor(s)
+        # 第二步：对当前局势进行价值打分
+        x = self.activate_func(self.fc1(features))
+        x = self.activate_func(self.fc2(x))
+        v_s = self.fc3(x)
         return v_s
+
+
+# （注：原有的 Actor_Beta 如果不使用，可以暂时不改，因为你在主函数默认用的是 Gaussian）
+class Actor_Beta(nn.Module):
+    pass  # 省略，当前使用 Gaussian
 
 
 class PPO_continuous():
@@ -116,10 +149,8 @@ class PPO_continuous():
         self.use_lr_decay = args.use_lr_decay
         self.use_adv_norm = args.use_adv_norm
 
-        if self.policy_dist == "Beta":
-            self.actor = Actor_Beta(args)
-        else:
-            self.actor = Actor_Gaussian(args)
+        # 默认使用 Gaussian
+        self.actor = Actor_Gaussian(args)
         self.critic = Critic(args)
 
         if self.set_adam_eps:  # Trick 9: set Adam epsilon=1e-5
@@ -129,39 +160,26 @@ class PPO_continuous():
             self.optimizer_actor = torch.optim.Adam(self.actor.parameters(), lr=self.lr_a)
             self.optimizer_critic = torch.optim.Adam(self.critic.parameters(), lr=self.lr_c)
 
-    def evaluate(self, s):  # When evaluating the policy, we only use the mean
+    def evaluate(self, s):
         s = torch.unsqueeze(torch.tensor(s, dtype=torch.float), 0)
-        if self.policy_dist == "Beta":
-            a = self.actor.mean(s).detach().numpy().flatten()
-        else:
-            a = self.actor(s).detach().numpy().flatten()
+        a = self.actor(s).detach().numpy().flatten()
         return a
 
     def choose_action(self, s):
         s = torch.unsqueeze(torch.tensor(s, dtype=torch.float), 0)
-        if self.policy_dist == "Beta":
-            with torch.no_grad():
-                dist = self.actor.get_dist(s)
-                a = dist.sample()  # Sample the action according to the probability distribution
-                a_logprob = dist.log_prob(a)  # The log probability density of the action
-        else:
-            with torch.no_grad():
-                dist = self.actor.get_dist(s)
-                a = dist.sample()  # Sample the action according to the probability distribution
-                a = torch.clamp(a, -self.max_action, self.max_action)  # [-max,max]
-                a_logprob = dist.log_prob(a)  # The log probability density of the action
+        with torch.no_grad():
+            dist = self.actor.get_dist(s)
+            a = dist.sample()
+            a = torch.clamp(a, -self.max_action, self.max_action)  # [-max,max]
+            a_logprob = dist.log_prob(a)
         return a.numpy().flatten(), a_logprob.numpy().flatten()
 
     def update(self, replay_buffer, total_steps):
-        s, a, a_logprob, r, s_, dw, done = replay_buffer.numpy_to_tensor()  # Get training data
-        """
-            Calculate the advantage using GAE
-            'dw=True' means dead or win, there is no next state s'
-            'done=True' represents the terminal of an episode(dead or win or reaching the max_episode_steps). When calculating the adv, if done=True, gae=0
-        """
+        s, a, a_logprob, r, s_, dw, done = replay_buffer.numpy_to_tensor()
+
         adv = []
         gae = 0
-        with torch.no_grad():  # adv and v_target have no gradient
+        with torch.no_grad():
             vs = self.critic(s)
             vs_ = self.critic(s_)
             deltas = r + self.gamma * (1.0 - dw) * vs_ - vs
@@ -170,39 +188,36 @@ class PPO_continuous():
                 adv.insert(0, gae)
             adv = torch.tensor(adv, dtype=torch.float).view(-1, 1)
             v_target = adv + vs
-            if self.use_adv_norm:  # Trick 1:advantage normalization
+            if self.use_adv_norm:
                 adv = ((adv - adv.mean()) / (adv.std() + 1e-5))
 
-        # Optimize policy for K epochs:
         for _ in range(self.K_epochs):
-            # Random sampling and no repetition. 'False' indicates that training will continue even if the number of samples in the last time is less than mini_batch_size
             for index in BatchSampler(SubsetRandomSampler(range(self.batch_size)), self.mini_batch_size, False):
                 dist_now = self.actor.get_dist(s[index])
-                dist_entropy = dist_now.entropy().sum(1, keepdim=True)  # shape(mini_batch_size X 1)
+                dist_entropy = dist_now.entropy().sum(1, keepdim=True)
                 a_logprob_now = dist_now.log_prob(a[index])
-                # a/b=exp(log(a)-log(b))  In multi-dimensional continuous action space，we need to sum up the log_prob
-                ratios = torch.exp(a_logprob_now.sum(1, keepdim=True) - a_logprob[index].sum(1, keepdim=True))  # shape(mini_batch_size X 1)
+                ratios = torch.exp(a_logprob_now.sum(1, keepdim=True) - a_logprob[index].sum(1, keepdim=True))
 
-                surr1 = ratios * adv[index]  # Only calculate the gradient of 'a_logprob_now' in ratios
+                surr1 = ratios * adv[index]
                 surr2 = torch.clamp(ratios, 1 - self.epsilon, 1 + self.epsilon) * adv[index]
-                actor_loss = -torch.min(surr1, surr2) - self.entropy_coef * dist_entropy  # Trick 5: policy entropy
-                # Update actor
+                actor_loss = -torch.min(surr1, surr2) - self.entropy_coef * dist_entropy
+
                 self.optimizer_actor.zero_grad()
                 actor_loss.mean().backward()
-                if self.use_grad_clip:  # Trick 7: Gradient clip
+                if self.use_grad_clip:
                     torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
                 self.optimizer_actor.step()
 
                 v_s = self.critic(s[index])
                 critic_loss = F.mse_loss(v_target[index], v_s)
-                # Update critic
+
                 self.optimizer_critic.zero_grad()
                 critic_loss.backward()
-                if self.use_grad_clip:  # Trick 7: Gradient clip
+                if self.use_grad_clip:
                     torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
                 self.optimizer_critic.step()
 
-        if self.use_lr_decay:  # Trick 6:learning rate Decay
+        if self.use_lr_decay:
             self.lr_decay(total_steps)
 
     def lr_decay(self, total_steps):
