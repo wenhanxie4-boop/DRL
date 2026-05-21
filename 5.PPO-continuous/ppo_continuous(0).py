@@ -4,7 +4,7 @@ from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 import torch.nn as nn
 from torch.distributions import Beta, Normal
 
-# 全连接层（Linear MLP）版本
+# 全连接层（Linear MLP）原先的版本
 # Trick 8: orthogonal initialization
 def orthogonal_init(layer, gain=1.0):
     nn.init.orthogonal_(layer.weight, gain=gain)

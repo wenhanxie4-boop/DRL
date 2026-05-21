@@ -70,7 +70,7 @@ class EnvCore(gym.Env):             #用户数据
         # ---------------------- 4. 动态数据与阈值参数 -----------------------------#
         # 【修改点】：大幅降低自然增长率，配合你修改的初始数据，防止开局大面积连坐爆仓
         self.min_data_increase = 0
-        self.max_data_increase = 500
+        self.max_data_increase = 200
         self.max_capacity = 60000.0  # 容量上限
         self.wake_up_threshold = 25000.0  # 唤醒阈值
         self.sleep_threshold = 100.0  # 休眠阈值
@@ -78,7 +78,8 @@ class EnvCore(gym.Env):             #用户数据
 
         # ---------------------- 5. 奖励权重设计 (打破习得性无助) -----------------------------#
         self.w_data = 0.01  # 增加采集奖励
-        self.w_drop = 0.0005  # 削弱爆仓丢包重罚，只要去救火就能赚回来
+        # 【核心修改 1】：把爆仓惩罚从 0.0005 暴增到 0.01！漏掉1M数据等于白收集1M数据
+        self.w_drop = 0.01
         self.w_dist = 0.30  # 适当提高距离引导动力  0.2改为0.4
         self.w_energy = 1  # 降低能耗惩罚，鼓励无人机多移动
         self.step_penalty = 0.5  # 防原地悬停步数惩罚
@@ -117,9 +118,15 @@ class EnvCore(gym.Env):             #用户数据
 
     def update_user_data(self):
         """更新所有设备的数据，并返回爆仓丢弃的总数据量"""
-        dropped_data_this_step = 0.0      #每一步因为爆仓而丢弃的数据量
+        dropped_data_this_step = 0.0
         for user in self.Users:
             data_increase = np.random.randint(self.min_data_increase, self.max_data_increase)
+
+            # 【核心修改 2】：突发流量机制！每个时间步，每个活跃设备有 3% 的概率发生数据大爆炸
+            if user.is_active and np.random.rand() < 0.03:
+                # 突然暴增 10000 到 20000 的数据，极其容易爆仓
+                data_increase += np.random.randint(10000, 20000)
+
             new_amount = user.amount_data + data_increase
 
             if new_amount > self.max_capacity:

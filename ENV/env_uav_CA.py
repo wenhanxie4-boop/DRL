@@ -67,16 +67,18 @@ class EnvCore(gym.Env):
         self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(self.obs_dim,), dtype=np.float32)
 
         # ---------------------- 4. 动态数据与阈值参数 -----------------------------#
+        # 【修改点】：大幅降低自然增长率，配合你修改的初始数据，防止开局大面积连坐爆仓
         self.min_data_increase = 0
-        self.max_data_increase = 500
+        self.max_data_increase = 200
         self.max_capacity = 60000.0
         self.wake_up_threshold = 25000.0
         self.sleep_threshold = 100.0
         self.max_theoretical_energy = self.estimate_max_energy()
 
-        # ---------------------- 5. 奖励权重设计 -----------------------------#
+        # ---------------------- 5. 奖励权重设计 (打破习得性无助) -----------------------------#
         self.w_data = 0.01
-        self.w_drop = 0.0005
+        # 【核心修改 1】：把爆仓惩罚从 0.0005 暴增到 0.01！漏掉1M数据等于白收集1M数据
+        self.w_drop = 0.01
         self.w_dist = 0.30
         self.w_energy = 1
         self.step_penalty = 0.5
@@ -113,9 +115,16 @@ class EnvCore(gym.Env):
         return common_functions.calculate_uav_energy_consumption(max_dx, max_dy, 0, self.delta_t)
 
     def update_user_data(self):
+        """更新所有设备的数据，并返回爆仓丢弃的总数据量"""
         dropped_data_this_step = 0.0
         for user in self.Users:
             data_increase = np.random.randint(self.min_data_increase, self.max_data_increase)
+
+            # 【核心修改 2】：突发流量机制！每个时间步，每个活跃设备有 3% 的概率发生数据大爆炸
+            if user.is_active and np.random.rand() < 0.03:
+                # 突然暴增 10000 到 20000 的数据，极其容易爆仓
+                data_increase += np.random.randint(10000, 20000)
+
             new_amount = user.amount_data + data_increase
 
             if new_amount > self.max_capacity:
@@ -126,18 +135,34 @@ class EnvCore(gym.Env):
         return dropped_data_this_step
 
     def _get_user_scores(self):
-        """计算性价比得分，休眠设备直接出局 (-1)。现在仅用于后台提供奖励引导"""
+        """
+        【CA 环境专属向导】：基于紧急程度 (TTO) 的打分机制
+        不再单纯贪图距离近，而是强制引导无人机关注即将爆仓的设备
+        """
         user_info = []
         uav_pos = self.uav.position[:2]
+
+        # 使用真实的平均增长率来预估 TTO
+        avg_increase = 100.0 + (0.03 * 15000.0) # 日常100 + 3%概率的15000突发
+
         for user in self.Users:
             rem_data = user.amount_data - user.total_transmitted_data
             dist = np.linalg.norm(uav_pos - user.position[:2])
 
             if user.is_active and rem_data > 0:
-                score = rem_data / (dist + 80.0)
+                rem_capacity = self.max_capacity - rem_data
+                tto_steps = rem_capacity / avg_increase
+
+                # 爆仓时间越短，得分呈指数级爆炸，强迫无人机去救火！
+                urgency = 1.0 / (tto_steps + 1.0)
+
+                # 综合打分：90%看紧急程度，10%看距离（防止同等紧急下乱飞）
+                score = urgency * 1000.0 + (100.0 / (dist + 1.0))
             else:
                 score = -1.0
+
             user_info.append({'user': user, 'dist': dist, 'rem_data': rem_data, 'score': score})
+
         user_info.sort(key=lambda x: x['score'], reverse=True)
         return user_info
 
