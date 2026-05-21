@@ -4,6 +4,7 @@ from gymnasium import spaces
 import copy
 from . import common_functions
 
+
 # 融合交叉注意力cross-attention前置特征提取的 IoT 突发数据收集模型 (全局视野版)
 
 class UAV(object):
@@ -78,7 +79,7 @@ class EnvCore(gym.Env):
         # ---------------------- 5. 奖励权重设计 (打破习得性无助) -----------------------------#
         self.w_data = 0.01
         # 【核心修改 1】：把爆仓惩罚从 0.0005 暴增到 0.01！漏掉1M数据等于白收集1M数据
-        self.w_drop = 0.01
+        self.w_drop = 0.002
         self.w_dist = 0.30
         self.w_energy = 1
         self.step_penalty = 0.5
@@ -118,12 +119,12 @@ class EnvCore(gym.Env):
         """更新所有设备的数据，并返回爆仓丢弃的总数据量"""
         dropped_data_this_step = 0.0
         for user in self.Users:
+            # 日常缓慢增长
             data_increase = np.random.randint(self.min_data_increase, self.max_data_increase)
 
-            # 【核心修改 2】：突发流量机制！每个时间步，每个活跃设备有 3% 的概率发生数据大爆炸
-            if user.is_active and np.random.rand() < 0.03:
-                # 突然暴增 10000 到 20000 的数据，极其容易爆仓
-                data_increase += np.random.randint(10000, 20000)
+            # 【温和版修改】：同步为 0.5% 极低概率触发 5000~10000 的中等突发
+            if user.is_active and np.random.rand() < 0.005:
+                data_increase += np.random.randint(5000, 10000)
 
             new_amount = user.amount_data + data_increase
 
@@ -137,13 +138,12 @@ class EnvCore(gym.Env):
     def _get_user_scores(self):
         """
         【CA 环境专属向导】：基于紧急程度 (TTO) 的打分机制
-        不再单纯贪图距离近，而是强制引导无人机关注即将爆仓的设备
         """
         user_info = []
         uav_pos = self.uav.position[:2]
 
-        # 使用真实的平均增长率来预估 TTO
-        avg_increase = 100.0 + (0.03 * 15000.0) # 日常100 + 3%概率的15000突发
+        # 【温和版修改】：严格匹配新的数学期望 (100 + 0.005 * 7500 = 137.5)
+        avg_increase = 137.5
 
         for user in self.Users:
             rem_data = user.amount_data - user.total_transmitted_data
@@ -156,7 +156,7 @@ class EnvCore(gym.Env):
                 # 爆仓时间越短，得分呈指数级爆炸，强迫无人机去救火！
                 urgency = 1.0 / (tto_steps + 1.0)
 
-                # 综合打分：90%看紧急程度，10%看距离（防止同等紧急下乱飞）
+                # 综合打分：90%看紧急程度，10%看距离
                 score = urgency * 1000.0 + (100.0 / (dist + 1.0))
             else:
                 score = -1.0
@@ -167,11 +167,11 @@ class EnvCore(gym.Env):
         return user_info
 
     def get_current_state(self):
-        """【核心修改点】：重构为提供给交叉注意力机制的全局 205 维视野"""
+        """提供给交叉注意力机制的全局 205 维视野"""
         obs = []
         uav_pos = self.uav.position[:2]
 
-        # 1. 提取无人机自身与禁飞区状态 (5 维)，对应后续的 Query
+        # 1. 提取无人机自身与禁飞区状态 (5 维)
         norm_uav_x = (uav_pos[0] / self.length) * 2 - 1.0
         norm_uav_y = (uav_pos[1] / self.width) * 2 - 1.0
         rel_nfz_x = (self.nfz_center[0] - uav_pos[0]) / self.length
@@ -179,10 +179,9 @@ class EnvCore(gym.Env):
         dist_to_nfz_edge = (np.linalg.norm(self.nfz_center - uav_pos) - self.nfz_radius) / self.length
         obs.extend([norm_uav_x, norm_uav_y, rel_nfz_x, rel_nfz_y, dist_to_nfz_edge])
 
-        # 2. 提取所有 50 个用户的状态 (50 * 4 = 200 维)，对应后续的 Key 和 Value
-        # 预估平均数据增长量
-        avg_increase = (self.min_data_increase + self.max_data_increase) / 2.0
-        if avg_increase == 0: avg_increase = 1.0  # 防除零报错
+        # 2. 提取所有 50 个用户的状态
+        # 【温和版修改】：严格匹配新的数学期望 (137.5)
+        avg_increase = 137.5
 
         for user in self.Users:
             rel_x = (user.position[0] - uav_pos[0]) / self.length
@@ -190,14 +189,14 @@ class EnvCore(gym.Env):
             rem_data = user.amount_data - user.total_transmitted_data
             norm_data = min(rem_data / self.max_capacity, 1.0)
 
-            # 创新点：预估爆仓时间 TTO (Time-to-Overflow)
+            # 预估爆仓时间 TTO (Time-to-Overflow)
             if user.is_active and rem_data > 0:
                 rem_capacity = self.max_capacity - rem_data
                 tto_steps = rem_capacity / avg_increase
-                # 将步骤转化为相对于回合总长度 T 的比例，越接近 0 越危险，大于 1 代表本回合内绝对安全
+                # 越接近 0 越危险，大于 1 代表本回合内绝对安全
                 tto_norm = min(tto_steps / self.T, 1.0)
             else:
-                tto_norm = 1.0  # 休眠或没数据可采的设备，爆仓时间视为无限远（绝对安全）
+                tto_norm = 1.0
                 norm_data = 0.0
 
             obs.extend([rel_x, rel_y, norm_data, tto_norm])

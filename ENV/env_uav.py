@@ -4,7 +4,8 @@ from gymnasium import spaces
 import copy
 from . import common_functions
 
-# 带有唤醒/休眠机制、防爆仓溢出惩罚、防状态抖动粘性槽位的 IoT 突发数据收集模型 (终极稳态版)
+
+# 带有唤醒/休眠机制、防爆仓溢出惩罚、防状态抖动粘性槽位的 IoT 突发数据收集模型
 
 class UAV(object):
     def __init__(self, position):
@@ -31,7 +32,7 @@ class User(object):
         self.max_capacity = 60000.0
 
 
-class EnvCore(gym.Env):             #用户数据
+class EnvCore(gym.Env):  # 用户数据
     def __init__(self, length=500, width=500, num_user=50, UAV_fixed_z=100, delta_t=1,
                  users_path="/home/xiewenhan_25/Project/DRL_code_pytorch/DRL-code-pytorch-main/5.PPO-continuous/data_train/users_50_v2.txt"):
         super(EnvCore, self).__init__()
@@ -79,7 +80,7 @@ class EnvCore(gym.Env):             #用户数据
         # ---------------------- 5. 奖励权重设计 (打破习得性无助) -----------------------------#
         self.w_data = 0.01  # 增加采集奖励
         # 【核心修改 1】：把爆仓惩罚从 0.0005 暴增到 0.01！漏掉1M数据等于白收集1M数据
-        self.w_drop = 0.01
+        self.w_drop = 0.002
         self.w_dist = 0.30  # 适当提高距离引导动力  0.2改为0.4
         self.w_energy = 1  # 降低能耗惩罚，鼓励无人机多移动
         self.step_penalty = 0.5  # 防原地悬停步数惩罚
@@ -87,7 +88,7 @@ class EnvCore(gym.Env):             #用户数据
 
         # --- 目标锁定与槽位状态追踪器 ---
         self.target_user_id = -1
-        self.prev_target_dist = 0.0      #上一时刻无人机与主目标用户之间的平面距离
+        self.prev_target_dist = 0.0  # 上一时刻无人机与主目标用户之间的平面距离
         self.secondary_slots = [-1, -1]  # 【新增】：目标二号和三号位的粘性记录器
 
         self.initialize_users()
@@ -120,12 +121,12 @@ class EnvCore(gym.Env):             #用户数据
         """更新所有设备的数据，并返回爆仓丢弃的总数据量"""
         dropped_data_this_step = 0.0
         for user in self.Users:
+            # 日常缓慢增长 (0~200)
             data_increase = np.random.randint(self.min_data_increase, self.max_data_increase)
 
-            # 【核心修改 2】：突发流量机制！每个时间步，每个活跃设备有 3% 的概率发生数据大爆炸
-            if user.is_active and np.random.rand() < 0.03:
-                # 突然暴增 10000 到 20000 的数据，极其容易爆仓
-                data_increase += np.random.randint(10000, 20000)
+            # 【温和版修改】：0.5% 极低概率触发 5000~10000 的中等突发
+            if user.is_active and np.random.rand() < 0.005:
+                data_increase += np.random.randint(5000, 10000)
 
             new_amount = user.amount_data + data_increase
 
@@ -142,10 +143,10 @@ class EnvCore(gym.Env):             #用户数据
         uav_pos = self.uav.position[:2]
         for user in self.Users:
             rem_data = user.amount_data - user.total_transmitted_data
-            dist = np.linalg.norm(uav_pos - user.position[:2])    #距离是按直线距离计算的，但是有禁飞区，待完善-----
+            dist = np.linalg.norm(uav_pos - user.position[:2])  # 距离是按直线距离计算的，但是有禁飞区，待完善-----
 
-            if user.is_active and rem_data > 0:   #处于激活状态才可以
-                score = rem_data / (dist + 80.0)  #常数的大小决定了无人机是近视眼还是远视眼
+            if user.is_active and rem_data > 0:  # 处于激活状态才可以
+                score = rem_data / (dist + 80.0)  # 常数的大小决定了无人机是近视眼还是远视眼
             else:
                 score = -1.0
             user_info.append({'user': user, 'dist': dist, 'rem_data': rem_data, 'score': score})
@@ -155,7 +156,7 @@ class EnvCore(gym.Env):             #用户数据
     def get_current_state(self):
         """重构后的 14 维状态空间：彻底消除排列抖动"""
 
-        obs = []   #----------观测空间---------
+        obs = []  # ----------观测空间---------
         uav_pos = self.uav.position[:2]
 
         # 1. 无人机坐标 (2维)
@@ -175,7 +176,7 @@ class EnvCore(gym.Env):             #用户数据
             obs.extend([0.0, 0.0, 0.0])
 
         # ---------- 3 & 4. 二三槽位粘性锁定逻辑 (防排列抖动) ---------- #
-        active_pool = {u.user_id: u for u in self.Users if u.is_active}  #构建一个活跃用户的字典
+        active_pool = {u.user_id: u for u in self.Users if u.is_active}  # 构建一个活跃用户的字典
 
         # 避免主目标霸占副槽位  排除掉主目标
         if target_user and target_user.is_active and target_user.user_id in active_pool:
