@@ -136,35 +136,26 @@ class EnvCore(gym.Env):
         return dropped_data_this_step
 
     def _get_user_scores(self):
-        """
-        【CA 环境专属向导】：基于紧急程度 (TTO) 的打分机制
-        """
-        user_info = []
-        uav_pos = self.uav.position[:2]
+            """
+            恢复为基础的距离驱动型向导。
+            让奖励整形回归“提供局部密集引导”的本职工作，
+            全局的爆仓危机调度，交由 Actor 神经网络里的 Cross-Attention 去自己领悟！
+            """
+            user_info = []
+            uav_pos = self.uav.position[:2]
+            for user in self.Users:
+                rem_data = user.amount_data - user.total_transmitted_data
+                dist = np.linalg.norm(uav_pos - user.position[:2])
 
-        # 【温和版修改】：严格匹配新的数学期望 (100 + 0.005 * 7500 = 137.5)
-        avg_increase = 137.5
+                if user.is_active and rem_data > 0:
+                    # 恢复为单纯的“数据量/距离”近视眼打分
+                    score = rem_data / (dist + 80.0)
+                else:
+                    score = -1.0
+                user_info.append({'user': user, 'dist': dist, 'rem_data': rem_data, 'score': score})
 
-        for user in self.Users:
-            rem_data = user.amount_data - user.total_transmitted_data
-            dist = np.linalg.norm(uav_pos - user.position[:2])
-
-            if user.is_active and rem_data > 0:
-                rem_capacity = self.max_capacity - rem_data
-                tto_steps = rem_capacity / avg_increase
-
-                # 爆仓时间越短，得分呈指数级爆炸，强迫无人机去救火！
-                urgency = 1.0 / (tto_steps + 1.0)
-
-                # 综合打分：90%看紧急程度，10%看距离
-                score = urgency * 1000.0 + (100.0 / (dist + 1.0))
-            else:
-                score = -1.0
-
-            user_info.append({'user': user, 'dist': dist, 'rem_data': rem_data, 'score': score})
-
-        user_info.sort(key=lambda x: x['score'], reverse=True)
-        return user_info
+            user_info.sort(key=lambda x: x['score'], reverse=True)
+            return user_info
 
     def get_current_state(self):
         """提供给交叉注意力机制的全局 205 维视野"""
