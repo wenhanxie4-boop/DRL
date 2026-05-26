@@ -22,6 +22,10 @@ class UAV(object):
 class User(object):
     def __init__(self, position, amount_data, radius, user_id):
         self.position = position
+
+        # 初始数据量，用于每个 episode reset
+        self.initial_amount_data = amount_data
+
         self.amount_data = amount_data
         self.radius = radius
         self.user_id = user_id
@@ -34,7 +38,7 @@ class User(object):
 
 class EnvCore(gym.Env):  # 用户数据
     def __init__(self, length=500, width=500, num_user=50, UAV_fixed_z=100, delta_t=1,
-                 users_path="/home/xiewenhan_25/Project/DRL_code_pytorch/DRL-code-pytorch-main/5.PPO-continuous/data_train/users_50_v2.txt"):
+                 users_path="./data_train/users_50_v2.txt"):
         super(EnvCore, self).__init__()
 
         # ---------------------- 1. 基础环境参数 -----------------------------#
@@ -78,13 +82,12 @@ class EnvCore(gym.Env):  # 用户数据
         self.max_theoretical_energy = self.estimate_max_energy()
 
         # ---------------------- 5. 奖励权重设计 (打破习得性无助) -----------------------------#
-        self.w_data = 0.01  # 增加采集奖励
-        # 【核心修改 1】：把爆仓惩罚从 0.0005 暴增到 0.01！漏掉1M数据等于白收集1M数据
-        self.w_drop = 0.002
-        self.w_dist = 0.30  # 适当提高距离引导动力  0.2改为0.4
-        self.w_energy = 1  # 降低能耗惩罚，鼓励无人机多移动
-        self.step_penalty = 0.5  # 防原地悬停步数惩罚
-        self.nfz_penalty = 500.0  # 禁飞区死刑重罚
+        self.w_data = 0.01  # 收集数据奖励
+        self.w_drop = 0.01  # 爆仓惩罚
+        self.w_dist = 0.05  # 距离引导奖励
+        self.w_energy = 1  # 能耗惩罚
+        self.step_penalty = 0.5  # 原地悬停惩罚
+        self.nfz_penalty = 500.0  # 禁飞区惩罚
 
         # --- 目标锁定与槽位状态追踪器 ---
         self.target_user_id = -1
@@ -242,7 +245,10 @@ class EnvCore(gym.Env):  # 用户数据
         self.uav.trajectory.append(init_pos.copy())
 
         for user in self.Users:
-            user.total_transmitted_data = 0
+            # 重置为初始数据量
+            user.amount_data = user.initial_amount_data
+
+            user.total_transmitted_data = 0.0
             rem_data = user.amount_data - user.total_transmitted_data
 
             if rem_data > self.wake_up_threshold:
