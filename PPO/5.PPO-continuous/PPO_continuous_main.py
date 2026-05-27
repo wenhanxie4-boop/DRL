@@ -4,7 +4,7 @@ from torch.utils.tensorboard import SummaryWriter
 import argparse
 from normalization import Normalization, RewardScaling
 from replaybuffer import ReplayBuffer
-from ppo_continuous import PPO_continuous
+from ppo_continuous_CA import PPO_continuous
 
 import os
 import copy

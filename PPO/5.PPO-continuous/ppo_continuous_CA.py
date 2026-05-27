@@ -18,7 +18,7 @@ class AttentionExtractor(nn.Module):
     def __init__(self, embed_dim=32, num_heads=4):
         super(AttentionExtractor, self).__init__()
         # 1. 身份转换器 (Linear层)
-        # UAV状态有 5 维，User状态有 5 维
+        # UAV状态有 5 维，User状态有 4 维
         self.q_linear = nn.Linear(5, embed_dim)
         self.k_linear = nn.Linear(5, embed_dim)
         self.v_linear = nn.Linear(5, embed_dim)
@@ -31,8 +31,8 @@ class AttentionExtractor(nn.Module):
         uav_state = obs[:, :5]  # 无人机与禁飞区状态 (Batch, 5)
         users_state = obs[:, 5:]  # 50个设备的状态 (Batch, 200)
 
-        # 将 200 维的设备状态折叠成 50 个独立的实体，每个实体 5 维
-        users_state = users_state.view(-1, 50, 5)
+        # 将 200 维的设备状态折叠成 50 个独立的实体，每个实体 4 维
+        users_state = users_state.view(-1, 50, 5)  # (Batch, 50, 4)
 
         # 生成 Q, K, V
         # Q 增加一个维度代表只有 1 个查询主体(无人机) -> (Batch, 1, embed_dim)

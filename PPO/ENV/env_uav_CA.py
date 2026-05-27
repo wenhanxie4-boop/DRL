@@ -5,7 +5,7 @@ import copy
 from . import common_functions
 
 
-# 融合交叉注意力cross-attention前置特征提取的 IoT 突发数据收集模型
+# 融合交叉注意力cross-attention前置特征提取的 IoT 突发数据收集模型 (全局视野版)
 
 class UAV(object):
     def __init__(self, position):
