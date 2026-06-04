@@ -4,6 +4,8 @@ from torch.utils.tensorboard import SummaryWriter
 import argparse
 from normalization import Normalization, RewardScaling
 from replaybuffer import ReplayBuffer
+
+# 注意使用的是哪个算法＜（＾－＾）＞
 from ppo_continuous_CA import PPO_continuous
 
 import os
@@ -11,8 +13,8 @@ import copy
 import pickle
 from datetime import datetime
 
-# 2026.04.03修改
-from env.env_uav import EnvCore
+# 注意使用的是哪个环境＜（＾－＾）＞
+from env.env_uav_CA import EnvCore
 
 
 def evaluate_policy(args, env, agent, state_norm):
@@ -46,9 +48,9 @@ def evaluate_policy(args, env, agent, state_norm):
 
 
 def main(args, env_name, number, seed):
-    # 实例化环境
-    env = EnvCore(users_path="./data_train/users_50_new.txt")
-    env_evaluate = EnvCore(users_path="./data_train/users_50_new.txt")
+    #  注意查看路径是否正确＜（＾－＾）＞
+    env = EnvCore(users_path="./data_train/users_50_v2.txt")
+    env_evaluate = EnvCore(users_path="./data_train/users_50_v2.txt")
 
     # Set random seed
     env.reset(seed=seed)
@@ -66,14 +68,17 @@ def main(args, env_name, number, seed):
     # --- 新增：为了适应未来的多无人机扩展，获取智能体数量（目前为1） ---
     num_agent = getattr(env, 'num_agent', 1)
 
-    # --- 新增：设置保存路径和日期命名 ---
     timestamp = datetime.now().strftime("%m%d%H%M")
+    suffix = "CA"  # 定义你的区别标识      -----记得修改tensorboard的标签＜（＾－＾）＞
+    folder_name = f"{timestamp}_{suffix}"
+
+    # 2. 设置保存路径
     base_save_dir = os.path.join('.', 'results', 'PPO')
     os.makedirs(base_save_dir, exist_ok=True)
 
-    # 2. 精简保存文件名，直接使用时间戳
-    env_save_path = os.path.join(base_save_dir, f'best_env_{timestamp}.pkl')
-    model_save_path = os.path.join(base_save_dir, f'best_model_{timestamp}.pth')
+    # 使用带 CA 的文件夹名来命名文件
+    env_save_path = os.path.join(base_save_dir, f'best_env_{folder_name}.pkl')
+    model_save_path = os.path.join(base_save_dir, f'best_model_{folder_name}.pth')
 
     best_episode_reward = -float('inf')  # 用于打擂台，记录历史最高分
     # --------------------------------
