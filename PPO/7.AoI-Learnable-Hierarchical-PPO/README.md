@@ -16,8 +16,12 @@ python PPO_Learnable_HRL_AoI_main.py
 
 Default high-level settings:
 
-- `option_interval=15`
+- `option_interval=10`
 - `high_top_k=3`
+- `high_prior_beta=4.0`; set it to `0.0` to recover the pure learnable high-level policy
+- `high_residual_scale=0.25`; the high-level actor can only make a small bounded residual correction to the heuristic rank prior
+- candidate ranking uses the same AoI/data/overflow/distance weights as the heuristic HRL baseline
+- options use the stable fixed-interval behavior from the best learnable baseline
 - high-level option reward:
 
 ```text
@@ -33,7 +37,18 @@ Useful variants:
 python PPO_Learnable_HRL_AoI_main.py --option_interval 10
 python PPO_Learnable_HRL_AoI_main.py --high_top_k 5
 python PPO_Learnable_HRL_AoI_main.py --high_top_k 8
+python PPO_Learnable_HRL_AoI_main.py --high_prior_beta 0.0
+python PPO_Learnable_HRL_AoI_main.py --high_residual_scale 1.0
 ```
+
+Additional high-level diagnostics:
+
+- `High_Level/Entropy`
+- `High_Level/Repeat_Target_Rate`
+- `High_Level/Action_Rank_{k}_Rate`
+- `High_Level/Action_Rank_{k}_Prob`
+- `High_Level/Option_Data_By_Rank_{k}`
+- `High_Level/Option_AoI_By_Rank_{k}`
 
 Results follow the original project style:
 

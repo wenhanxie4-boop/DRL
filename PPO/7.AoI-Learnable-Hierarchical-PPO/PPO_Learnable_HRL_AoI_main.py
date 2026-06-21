@@ -105,7 +105,17 @@ def build_high_args(args, env):
         use_orthogonal_init=args.use_orthogonal_init,
         set_adam_eps=args.set_adam_eps,
         use_tanh=args.use_tanh,
+        high_prior_beta=args.high_prior_beta,
+        high_residual_scale=args.high_residual_scale,
     )
+
+
+def update_high_decision_stats(high_agent, high_state, action, stats):
+    probs, entropy = high_agent.action_diagnostics(high_state)
+    action = int(action)
+    stats["counts"][action] += 1
+    stats["prob_sums"] += probs
+    stats["entropy_sum"] += entropy
 
 
 def main(args, seed):
@@ -172,7 +182,7 @@ def main(args, seed):
             low_reward_scaling.reset()
             high_reward_scaling.reset()
 
-        current_high_s, current_high_a, current_high_logprob, _ = choose_high_option(
+        current_high_s, current_high_a, current_high_logprob, current_selected_user_id = choose_high_option(
             args, env, high_agent, high_state_norm, evaluate=False
         )
         option_collected_data = 0.0
@@ -204,6 +214,17 @@ def main(args, seed):
         ep_high_option_data = 0.0
         ep_high_option_drop = 0.0
         ep_high_option_aoi = 0.0
+        ep_high_stats = {
+            "counts": np.zeros(args.high_action_dim, dtype=np.float32),
+            "prob_sums": np.zeros(args.high_action_dim, dtype=np.float32),
+            "option_counts": np.zeros(args.high_action_dim, dtype=np.float32),
+            "option_data": np.zeros(args.high_action_dim, dtype=np.float32),
+            "option_aoi": np.zeros(args.high_action_dim, dtype=np.float32),
+            "entropy_sum": 0.0,
+            "repeat_targets": 0.0,
+            "repeat_checks": 0.0,
+        }
+        update_high_decision_stats(high_agent, current_high_s, current_high_a, ep_high_stats)
         ep_agent_rewards = [0.0] * num_agent
         ep_agent_data = [0.0] * num_agent
         ep_agent_energy = [0.0] * num_agent
@@ -272,6 +293,10 @@ def main(args, seed):
                 ep_high_option_data += option_collected_data
                 ep_high_option_drop += option_dropped_data
                 ep_high_option_aoi += avg_option_aoi_cost
+                current_high_rank = int(current_high_a)
+                ep_high_stats["option_counts"][current_high_rank] += 1
+                ep_high_stats["option_data"][current_high_rank] += option_collected_data
+                ep_high_stats["option_aoi"][current_high_rank] += avg_option_aoi_cost
 
                 high_r_for_train = high_reward_raw
                 if args.use_reward_norm:
@@ -302,7 +327,13 @@ def main(args, seed):
                 if not done:
                     current_high_s = next_high_s
                     current_high_a, current_high_logprob = high_agent.choose_action(current_high_s)
-                    env.set_high_level_action(current_high_a)
+                    previous_selected_user_id = current_selected_user_id
+                    current_selected_user_id = env.set_high_level_action(current_high_a)
+                    ep_high_stats["repeat_checks"] += 1.0
+                    ep_high_stats["repeat_targets"] += float(
+                        current_selected_user_id == previous_selected_user_id
+                    )
+                    update_high_decision_stats(high_agent, current_high_s, current_high_a, ep_high_stats)
                     ep_high_decisions += 1
 
             s_ = env.get_current_state()
@@ -376,6 +407,39 @@ def main(args, seed):
         writer.add_scalar("High_Level/Option_Data_Collected", ep_high_option_data, global_step=total_episodes)
         writer.add_scalar("High_Level/Option_Dropped_Data", ep_high_option_drop, global_step=total_episodes)
         writer.add_scalar("High_Level/Option_AoI_Cost", ep_high_option_aoi, global_step=total_episodes)
+        writer.add_scalar(
+            "High_Level/Entropy",
+            ep_high_stats["entropy_sum"] / max(ep_high_decisions, 1),
+            global_step=total_episodes,
+        )
+        writer.add_scalar(
+            "High_Level/Repeat_Target_Rate",
+            ep_high_stats["repeat_targets"] / max(ep_high_stats["repeat_checks"], 1.0),
+            global_step=total_episodes,
+        )
+        for rank in range(args.high_action_dim):
+            action_count = ep_high_stats["counts"][rank]
+            option_count = ep_high_stats["option_counts"][rank]
+            writer.add_scalar(
+                f"High_Level/Action_Rank_{rank}_Rate",
+                action_count / max(ep_high_decisions, 1),
+                global_step=total_episodes,
+            )
+            writer.add_scalar(
+                f"High_Level/Action_Rank_{rank}_Prob",
+                ep_high_stats["prob_sums"][rank] / max(ep_high_decisions, 1),
+                global_step=total_episodes,
+            )
+            writer.add_scalar(
+                f"High_Level/Option_Data_By_Rank_{rank}",
+                ep_high_stats["option_data"][rank] / max(option_count, 1.0),
+                global_step=total_episodes,
+            )
+            writer.add_scalar(
+                f"High_Level/Option_AoI_By_Rank_{rank}",
+                ep_high_stats["option_aoi"][rank] / max(option_count, 1.0),
+                global_step=total_episodes,
+            )
 
         if ep_reward > best_episode_reward:
             best_episode_reward = ep_reward
@@ -400,7 +464,7 @@ def main(args, seed):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Learnable AoI-HRL PPO for UAV data collection")
     parser.add_argument("--users_path", type=str, default="./data_train/users_50_v2.txt")
-    parser.add_argument("--option_interval", type=int, default=15)
+    parser.add_argument("--option_interval", type=int, default=10)
     parser.add_argument("--high_top_k", type=int, default=3)
     parser.add_argument("--seed", type=int, default=10)
     parser.add_argument("--high_w_data", type=float, default=0.01)
@@ -438,6 +502,8 @@ if __name__ == "__main__":
     parser.add_argument("--high_lr_c", type=float, default=3e-4)
     parser.add_argument("--high_gamma", type=float, default=0.99)
     parser.add_argument("--high_entropy_coef", type=float, default=0.02)
+    parser.add_argument("--high_prior_beta", type=float, default=4.0)
+    parser.add_argument("--high_residual_scale", type=float, default=0.25)
 
     args = parser.parse_args()
     main(args, seed=args.seed)

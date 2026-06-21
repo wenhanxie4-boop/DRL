@@ -29,8 +29,12 @@ class ActorDiscrete(nn.Module):
         x = self.activate_func(self.fc2(x))
         return self.logits_layer(x)
 
-    def get_dist(self, s):
-        logits = self.forward(s)
+    def get_dist(self, s, prior_beta=0.0, residual_scale=1.0):
+        residual_logits = residual_scale * torch.tanh(self.forward(s))
+        logits = residual_logits
+        if prior_beta > 0.0:
+            rank_prior = -torch.arange(logits.shape[-1], dtype=logits.dtype, device=logits.device)
+            logits = logits + prior_beta * rank_prior
         return Categorical(logits=logits)
 
 
@@ -69,6 +73,8 @@ class PPO_discrete_high:
         self.use_grad_clip = args.use_grad_clip
         self.use_lr_decay = args.use_lr_decay
         self.use_adv_norm = args.use_adv_norm
+        self.prior_beta = args.high_prior_beta
+        self.residual_scale = args.high_residual_scale
 
         self.actor = ActorDiscrete(args)
         self.critic = CriticDiscrete(args)
@@ -83,16 +89,24 @@ class PPO_discrete_high:
     def evaluate(self, s):
         s = torch.unsqueeze(torch.tensor(s, dtype=torch.float), 0)
         with torch.no_grad():
-            logits = self.actor(s)
-            return torch.argmax(logits, dim=-1).item()
+            dist = self.actor.get_dist(s, prior_beta=self.prior_beta, residual_scale=self.residual_scale)
+            return torch.argmax(dist.probs, dim=-1).item()
 
     def choose_action(self, s):
         s = torch.unsqueeze(torch.tensor(s, dtype=torch.float), 0)
         with torch.no_grad():
-            dist = self.actor.get_dist(s)
+            dist = self.actor.get_dist(s, prior_beta=self.prior_beta, residual_scale=self.residual_scale)
             a = dist.sample()
             a_logprob = dist.log_prob(a)
         return a.item(), a_logprob.item()
+
+    def action_diagnostics(self, s):
+        s = torch.unsqueeze(torch.tensor(s, dtype=torch.float), 0)
+        with torch.no_grad():
+            dist = self.actor.get_dist(s, prior_beta=self.prior_beta, residual_scale=self.residual_scale)
+            entropy = dist.entropy().item()
+            probs = dist.probs.squeeze(0).cpu().numpy()
+        return probs, entropy
 
     def update(self, replay_buffer, total_steps):
         s, a, a_logprob, r, s_, dw, done = replay_buffer.numpy_to_tensor()
@@ -113,7 +127,11 @@ class PPO_discrete_high:
 
         for _ in range(self.K_epochs):
             for index in BatchSampler(SubsetRandomSampler(range(self.batch_size)), self.mini_batch_size, False):
-                dist_now = self.actor.get_dist(s[index])
+                dist_now = self.actor.get_dist(
+                    s[index],
+                    prior_beta=self.prior_beta,
+                    residual_scale=self.residual_scale,
+                )
                 dist_entropy = dist_now.entropy().view(-1, 1)
                 a_logprob_now = dist_now.log_prob(a[index].squeeze(-1)).view(-1, 1)
                 ratios = torch.exp(a_logprob_now - a_logprob[index])

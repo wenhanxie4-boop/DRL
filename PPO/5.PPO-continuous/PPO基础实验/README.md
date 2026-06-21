@@ -27,28 +27,3 @@ env_index=3 represent 'Walker2d-v2'<br />
 
 ## Tutorial
 If you can read Chinese, you can get more information from this blog.https://zhuanlan.zhihu.com/p/512327050
-
-## Single-level GAT/Pointer PPO
-
-Run:
-
-```bash
-python PPO_GAT_main.py
-```
-
-This version has no high-level policy, target selector, or option mechanism.
-The PPO actor and critic directly process all user nodes and output the UAV's
-continuous movement.
-
-- `ENV/env_uav_gat_hrl.py`: global-state AoI environment without heuristic target decisions.
-- `ppo_gat_continuous.py`: graph-attention/pointer encoder embedded in continuous PPO.
-- `PPO_GAT_main.py`: single-level training and evaluation entry.
-
-Example:
-
-```bash
-python PPO_GAT_main.py --gat_hidden_dim 128 --gat_heads 4 --gat_layers 2
-```
-
-TensorBoard logs are written to `runs/*_GAT_PPO`. Best actor and critic
-checkpoints are saved to `results/GAT_PPO`.

@@ -153,7 +153,15 @@ class EnvCore(gym.Env):
         norm_data = min(self._remaining_data(user) / self.max_capacity, 1.0)
         norm_aoi = min(user.aoi / self.T, 1.0)
         overflow_risk = self._overflow_risk(user)
-        return norm_data + norm_aoi + overflow_risk - 0.5 * norm_dist
+        score = (
+            1.0 * norm_data
+            + 1.2 * norm_aoi
+            + 1.5 * overflow_risk
+            - 0.8 * norm_dist
+        )
+        if user.user_id == self.target_user_id:
+            score += 0.15
+        return score
 
     def _get_high_level_candidates(self):
         candidates = [u for u in self.Users if u.is_active and self._remaining_data(u) > 0]
