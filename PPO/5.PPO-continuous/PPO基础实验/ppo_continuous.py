@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn.functional as F
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
@@ -15,9 +16,9 @@ class Actor_Beta(nn.Module):
     def __init__(self, args):
         super(Actor_Beta, self).__init__()
         self.fc1 = nn.Linear(args.state_dim, args.hidden_width)
-        self.fc2 = nn.Linear(args.hidden_width, args.hidden_width)
-        self.alpha_layer = nn.Linear(args.hidden_width, args.action_dim)
-        self.beta_layer = nn.Linear(args.hidden_width, args.action_dim)
+        self.fc2 = nn.Linear(args.hidden_width, args.hidden_width2)
+        self.alpha_layer = nn.Linear(args.hidden_width2, args.action_dim)
+        self.beta_layer = nn.Linear(args.hidden_width2, args.action_dim)
         self.activate_func = [nn.ReLU(), nn.Tanh()][args.use_tanh]  # Trick10: use tanh
 
         if args.use_orthogonal_init:
@@ -51,9 +52,15 @@ class Actor_Gaussian(nn.Module):
         super(Actor_Gaussian, self).__init__()
         self.max_action = args.max_action
         self.fc1 = nn.Linear(args.state_dim, args.hidden_width)
-        self.fc2 = nn.Linear(args.hidden_width, args.hidden_width)
-        self.mean_layer = nn.Linear(args.hidden_width, args.action_dim)
-        self.log_std = nn.Parameter(torch.zeros(1, args.action_dim))  # We use 'nn.Parameter' to train log_std automatically
+        self.fc2 = nn.Linear(args.hidden_width, args.hidden_width2)
+        self.mean_layer = nn.Linear(args.hidden_width2, args.action_dim)
+        self.log_std = nn.Parameter(
+            torch.full(
+                (1, args.action_dim),
+                math.log(args.init_action_std),
+            )
+        )
+        # We use 'nn.Parameter' to train log_std automatically
         self.activate_func = [nn.ReLU(), nn.Tanh()][args.use_tanh]  # Trick10: use tanh
 
         if args.use_orthogonal_init:
@@ -80,8 +87,8 @@ class Critic(nn.Module):
     def __init__(self, args):
         super(Critic, self).__init__()
         self.fc1 = nn.Linear(args.state_dim, args.hidden_width)
-        self.fc2 = nn.Linear(args.hidden_width, args.hidden_width)
-        self.fc3 = nn.Linear(args.hidden_width, 1)
+        self.fc2 = nn.Linear(args.hidden_width, args.hidden_width2)
+        self.fc3 = nn.Linear(args.hidden_width2, 1)
         self.activate_func = [nn.ReLU(), nn.Tanh()][args.use_tanh]  # Trick10: use tanh
 
         if args.use_orthogonal_init:

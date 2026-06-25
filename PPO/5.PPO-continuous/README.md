@@ -52,3 +52,25 @@ python PPO_GAT_main.py --gat_hidden_dim 128 --gat_heads 4 --gat_layers 2
 
 TensorBoard logs are written to `runs/*_GAT_PPO`. Best actor and critic
 checkpoints are saved to `results/GAT_PPO`.
+
+### Current experiment environment
+
+The GAT and MLP baseline now use the same environment definition:
+
+- real per-user queue buffers; uploaded data immediately frees capacity;
+- heterogeneous arrival rates, burst probabilities, and buffer capacities;
+- randomized user observation order at every episode reset;
+- normalized data, drop, energy, AoI, and guide reward components;
+- efficiency metrics including energy per step, data per energy, drop rate,
+  and full-episode completion rate.
+
+The observation contains 5 UAV/NFZ features and 9 features per user. Models
+trained with the previous 305-dimensional observation are not compatible with
+this version and both comparison methods should be retrained from scratch.
+
+For the current main comparison:
+
+- user features use a fixed user-id order;
+- entering the NFZ restores the previous UAV position, applies the NFZ
+  penalty, and does not terminate the episode;
+- the MLP baseline uses hidden dimensions 256 and 128 instead of 64 and 64.

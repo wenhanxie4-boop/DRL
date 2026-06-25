@@ -27,16 +27,25 @@ def str_to_bool(value):
 def evaluate_policy(args, env, agent, state_norm):
     rewards = []
     data_values = []
+    generated_values = []
+    dropped_values = []
+    energy_values = []
+    step_values = []
     nfz_values = []
     aoi_values = []
+    completion_values = []
 
-    for _ in range(args.evaluate_times):
-        state, _ = env.reset()
+    for evaluate_index in range(args.evaluate_times):
+        state, _ = env.reset(seed=args.seed + 1000 + evaluate_index)
         if args.use_state_norm:
             state = state_norm(state, update=False)
 
         episode_reward = 0.0
         episode_data = 0.0
+        episode_generated_data = 0.0
+        episode_dropped_data = 0.0
+        episode_energy = 0.0
+        episode_steps = 0
         episode_nfz = 0
         final_aoi = 0.0
         terminated = False
@@ -52,19 +61,47 @@ def evaluate_policy(args, env, agent, state_norm):
                 next_state = state_norm(next_state, update=False)
 
             state = next_state
+            episode_steps += 1
             episode_reward += reward
             episode_data += info["collected_data"]
+            episode_generated_data += info["generated_data"]
+            episode_dropped_data += info["dropped_data"]
+            episode_energy += info["energy"]
             episode_nfz += int(info["in_nfz"])
             final_aoi = info["active_mean_aoi"]
 
         rewards.append(episode_reward)
         data_values.append(episode_data)
+        generated_values.append(episode_generated_data)
+        dropped_values.append(episode_dropped_data)
+        energy_values.append(episode_energy)
+        step_values.append(episode_steps)
         nfz_values.append(episode_nfz)
         aoi_values.append(final_aoi)
+        completion_values.append(float(truncated and not terminated))
 
     return {
         "reward": float(np.mean(rewards)),
         "data": float(np.mean(data_values)),
+        "drop_rate": float(
+            np.mean(
+                np.asarray(dropped_values)
+                / (np.asarray(generated_values) + 1e-9)
+            )
+        ),
+        "energy_per_step": float(
+            np.mean(
+                np.asarray(energy_values)
+                / np.maximum(np.asarray(step_values), 1)
+            )
+        ),
+        "data_per_energy": float(
+            np.mean(
+                np.asarray(data_values)
+                / (np.asarray(energy_values) + 1e-9)
+            )
+        ),
+        "completion_rate": float(np.mean(completion_values)),
         "nfz": float(np.mean(nfz_values)),
         "aoi": float(np.mean(aoi_values)),
     }
@@ -117,8 +154,10 @@ def main(args):
             reward_scaling.reset()
 
         total_episodes += 1
+        episode_steps = 0
         episode_reward = 0.0
         episode_data = 0.0
+        episode_generated_data = 0.0
         episode_dropped_data = 0.0
         episode_energy = 0.0
         episode_nfz = 0
@@ -131,6 +170,7 @@ def main(args):
             not (terminated or truncated)
             and total_steps < args.max_train_steps
         ):
+            episode_steps += 1
             action, action_logprob = agent.choose_action(state)
             if args.policy_dist == "Beta":
                 env_action = 2.0 * (action - 0.5) * args.max_action
@@ -144,6 +184,7 @@ def main(args):
 
             episode_reward += reward
             episode_data += info["collected_data"]
+            episode_generated_data += info["generated_data"]
             episode_dropped_data += info["dropped_data"]
             episode_energy += info["energy"]
             episode_nfz += int(info["in_nfz"])
@@ -202,6 +243,26 @@ def main(args):
                     result["aoi"],
                     total_steps,
                 )
+                writer.add_scalar(
+                    "Evaluate/Drop_Rate_vs_Step",
+                    result["drop_rate"],
+                    total_steps,
+                )
+                writer.add_scalar(
+                    "Evaluate/Energy_Per_Step_vs_Step",
+                    result["energy_per_step"],
+                    total_steps,
+                )
+                writer.add_scalar(
+                    "Evaluate/Data_Per_Energy_vs_Step",
+                    result["data_per_energy"],
+                    total_steps,
+                )
+                writer.add_scalar(
+                    "Evaluate/Completion_Rate_vs_Step",
+                    result["completion_rate"],
+                    total_steps,
+                )
 
         writer.add_scalar(
             "Episode_Total/Reward",
@@ -216,6 +277,11 @@ def main(args):
         writer.add_scalar(
             "Episode_Total/Dropped_Data",
             episode_dropped_data,
+            total_episodes,
+        )
+        writer.add_scalar(
+            "Episode_Total/Generated_Data",
+            episode_generated_data,
             total_episodes,
         )
         writer.add_scalar(
@@ -236,6 +302,26 @@ def main(args):
         writer.add_scalar(
             "Episode_Total/Guide_Distance_Reward",
             episode_guide_reward,
+            total_episodes,
+        )
+        writer.add_scalar(
+            "Efficiency/Energy_Per_Step",
+            episode_energy / max(episode_steps, 1),
+            total_episodes,
+        )
+        writer.add_scalar(
+            "Efficiency/Data_Per_Energy",
+            episode_data / (episode_energy + 1e-9),
+            total_episodes,
+        )
+        writer.add_scalar(
+            "Efficiency/Drop_Rate",
+            episode_dropped_data / (episode_generated_data + 1e-9),
+            total_episodes,
+        )
+        writer.add_scalar(
+            "Efficiency/Completed_Full_Episode",
+            float(truncated and not terminated),
             total_episodes,
         )
 
@@ -280,7 +366,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--batch_size", type=int, default=2048)
     parser.add_argument("--mini_batch_size", type=int, default=64)
-    parser.add_argument("--hidden_width", type=int, default=64)
+    parser.add_argument("--hidden_width", type=int, default=256)
+    parser.add_argument("--hidden_width2", type=int, default=128)
     parser.add_argument("--lr_a", type=float, default=3e-4)
     parser.add_argument("--lr_c", type=float, default=3e-4)
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -288,6 +375,7 @@ if __name__ == "__main__":
     parser.add_argument("--epsilon", type=float, default=0.2)
     parser.add_argument("--K_epochs", type=int, default=10)
     parser.add_argument("--entropy_coef", type=float, default=0.01)
+    parser.add_argument("--init_action_std", type=float, default=1.0)
     parser.add_argument("--use_adv_norm", type=str_to_bool, default=True)
     parser.add_argument("--use_state_norm", type=str_to_bool, default=True)
     parser.add_argument("--use_reward_norm", type=str_to_bool, default=False)

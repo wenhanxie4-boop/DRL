@@ -122,7 +122,12 @@ class ActorGaussian(nn.Module):
         self.max_action = args.max_action
         self.encoder = GraphPointerEncoder(args)
         self.mean_layer = nn.Linear(args.gat_hidden_dim, args.action_dim)
-        self.log_std = nn.Parameter(torch.zeros(1, args.action_dim))
+        self.log_std = nn.Parameter(
+            torch.full(
+                (1, args.action_dim),
+                math.log(args.init_action_std),
+            )
+        )
 
         if args.use_orthogonal_init:
             self.apply(self._initialize)
@@ -144,6 +149,9 @@ class ActorGaussian(nn.Module):
         mean = self.forward(state)
         std = torch.exp(self.log_std.expand_as(mean))
         return Normal(mean, std)
+
+    def get_action_std(self):
+        return torch.exp(self.log_std).detach().cpu().numpy().flatten()
 
 
 class ActorBeta(nn.Module):

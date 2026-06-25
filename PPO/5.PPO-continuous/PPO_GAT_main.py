@@ -28,10 +28,7 @@ def attention_statistics(attention, env):
     attention = np.asarray(attention, dtype=np.float64)
     entropy = -np.sum(attention * np.log(attention + 1e-12))
     normalized_entropy = entropy / np.log(len(attention))
-    active_mask = np.array(
-        [1.0 if user.is_active else 0.0 for user in env.Users],
-        dtype=np.float64,
-    )
+    active_mask = env.get_observation_active_mask().astype(np.float64)
     return {
         "entropy": float(normalized_entropy),
         "max_weight": float(np.max(attention)),
@@ -42,16 +39,25 @@ def attention_statistics(attention, env):
 def evaluate_policy(args, env, agent, state_norm):
     episode_rewards = []
     episode_data = []
+    episode_generated_data = []
+    episode_dropped_data = []
+    episode_energy = []
+    episode_steps = []
     episode_nfz = []
     episode_aoi = []
+    episode_completed = []
 
-    for _ in range(args.evaluate_times):
-        state, _ = env.reset()
+    for evaluate_index in range(args.evaluate_times):
+        state, _ = env.reset(seed=args.seed + 1000 + evaluate_index)
         if args.use_state_norm:
             state = state_norm(state, update=False)
 
         total_reward = 0.0
         total_data = 0.0
+        total_generated_data = 0.0
+        total_dropped_data = 0.0
+        total_energy = 0.0
+        steps = 0
         nfz_steps = 0
         final_aoi = 0.0
         terminated = False
@@ -67,19 +73,47 @@ def evaluate_policy(args, env, agent, state_norm):
                 next_state = state_norm(next_state, update=False)
 
             state = next_state
+            steps += 1
             total_reward += reward
             total_data += info["collected_data"]
+            total_generated_data += info["generated_data"]
+            total_dropped_data += info["dropped_data"]
+            total_energy += info["energy"]
             nfz_steps += int(info["in_nfz"])
             final_aoi = info["active_mean_aoi"]
 
         episode_rewards.append(total_reward)
         episode_data.append(total_data)
+        episode_generated_data.append(total_generated_data)
+        episode_dropped_data.append(total_dropped_data)
+        episode_energy.append(total_energy)
+        episode_steps.append(steps)
         episode_nfz.append(nfz_steps)
         episode_aoi.append(final_aoi)
+        episode_completed.append(float(truncated and not terminated))
 
     return {
         "reward": float(np.mean(episode_rewards)),
         "data": float(np.mean(episode_data)),
+        "drop_rate": float(
+            np.mean(
+                np.asarray(episode_dropped_data)
+                / (np.asarray(episode_generated_data) + 1e-9)
+            )
+        ),
+        "energy_per_step": float(
+            np.mean(
+                np.asarray(episode_energy)
+                / np.maximum(np.asarray(episode_steps), 1)
+            )
+        ),
+        "data_per_energy": float(
+            np.mean(
+                np.asarray(episode_data)
+                / (np.asarray(episode_energy) + 1e-9)
+            )
+        ),
+        "completion_rate": float(np.mean(episode_completed)),
         "nfz": float(np.mean(episode_nfz)),
         "aoi": float(np.mean(episode_aoi)),
     }
@@ -138,6 +172,7 @@ def main(args):
         episode_steps = 0
         episode_reward = 0.0
         episode_data = 0.0
+        episode_generated_data = 0.0
         episode_dropped_data = 0.0
         episode_energy = 0.0
         episode_nfz = 0
@@ -175,6 +210,7 @@ def main(args):
 
             episode_reward += reward
             episode_data += info["collected_data"]
+            episode_generated_data += info["generated_data"]
             episode_dropped_data += info["dropped_data"]
             episode_energy += info["energy"]
             episode_nfz += int(info["in_nfz"])
@@ -233,6 +269,26 @@ def main(args):
                     result["aoi"],
                     total_steps,
                 )
+                writer.add_scalar(
+                    "Evaluate/Drop_Rate_vs_Step",
+                    result["drop_rate"],
+                    total_steps,
+                )
+                writer.add_scalar(
+                    "Evaluate/Energy_Per_Step_vs_Step",
+                    result["energy_per_step"],
+                    total_steps,
+                )
+                writer.add_scalar(
+                    "Evaluate/Data_Per_Energy_vs_Step",
+                    result["data_per_energy"],
+                    total_steps,
+                )
+                writer.add_scalar(
+                    "Evaluate/Completion_Rate_vs_Step",
+                    result["completion_rate"],
+                    total_steps,
+                )
 
         writer.add_scalar(
             "Episode_Total/Reward",
@@ -247,6 +303,11 @@ def main(args):
         writer.add_scalar(
             "Episode_Total/Dropped_Data",
             episode_dropped_data,
+            total_episodes,
+        )
+        writer.add_scalar(
+            "Episode_Total/Generated_Data",
+            episode_generated_data,
             total_episodes,
         )
         writer.add_scalar(
@@ -270,6 +331,26 @@ def main(args):
             total_episodes,
         )
         writer.add_scalar(
+            "Efficiency/Energy_Per_Step",
+            episode_energy / max(episode_steps, 1),
+            total_episodes,
+        )
+        writer.add_scalar(
+            "Efficiency/Data_Per_Energy",
+            episode_data / (episode_energy + 1e-9),
+            total_episodes,
+        )
+        writer.add_scalar(
+            "Efficiency/Drop_Rate",
+            episode_dropped_data / (episode_generated_data + 1e-9),
+            total_episodes,
+        )
+        writer.add_scalar(
+            "Efficiency/Completed_Full_Episode",
+            float(truncated and not terminated),
+            total_episodes,
+        )
+        writer.add_scalar(
             "Attention/Normalized_Entropy",
             float(np.mean(attention_entropy)),
             total_episodes,
@@ -284,6 +365,18 @@ def main(args):
             float(np.mean(attention_active_mass)),
             total_episodes,
         )
+        if args.policy_dist == "Gaussian":
+            action_std = agent.actor.get_action_std()
+            writer.add_scalar(
+                "Policy/Action_Std_X",
+                float(action_std[0]),
+                total_episodes,
+            )
+            writer.add_scalar(
+                "Policy/Action_Std_Y",
+                float(action_std[1]),
+                total_episodes,
+            )
 
         if episode_reward > best_episode_reward:
             best_episode_reward = episode_reward
@@ -324,6 +417,7 @@ if __name__ == "__main__":
         default="Gaussian",
         choices=["Gaussian", "Beta"],
     )
+    parser.add_argument("--init_action_std", type=float, default=1.0)
     parser.add_argument("--batch_size", type=int, default=2048)
     parser.add_argument("--mini_batch_size", type=int, default=64)
     parser.add_argument("--lr_a", type=float, default=3e-4)
